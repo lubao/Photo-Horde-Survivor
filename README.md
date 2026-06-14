@@ -56,21 +56,9 @@ photo-horde-survivor/
 ## Prerequisites
 
 - Node.js 20+ and npm
-- AWS profile **`web-game`** (account `253988640130`, role `Admin`, region `us-east-1`)
-- Bedrock model access enabled for `amazon.nova-canvas-v1:0` in us-east-1
-
-### AWS profile (`~/.aws/config`)
-
-```ini
-[profile web-game]
-credential_process = ada credentials print --account 253988640130 --role Admin --format json
-region = us-east-1
-output = json
-```
-
-```bash
-aws sts get-caller-identity --profile web-game
-```
+- An AWS account with credentials configured (a named profile is recommended)
+- AWS region with Bedrock model access enabled for `amazon.nova-canvas-v1:0`
+  (the stack targets `us-east-1` by default — see `infra/bin/app.ts`)
 
 ## Test
 
@@ -82,17 +70,17 @@ npm run verify
 
 ## Deploy
 
-> ⚠️ Deploys real, billable resources to account `253988640130`. Ensure Bedrock model
-> access for `amazon.nova-canvas-v1:0` is enabled first.
+> ⚠️ Deploys real, billable resources to your AWS account. Ensure Bedrock model
+> access for `amazon.nova-canvas-v1:0` is enabled in the target region first.
 
 ```bash
 cd backend && npm install && cd ..
 cd infra   && npm install
 
 # first time per account/region only
-npx cdk bootstrap --profile web-game
+npx cdk bootstrap --profile <your-profile>
 
-npx cdk deploy --profile web-game --require-approval never
+npx cdk deploy --profile <your-profile> --require-approval never
 ```
 
 CDK outputs `SiteUrl` (CloudFront). The frontend `config.json` (API base + Cognito IDs)
@@ -140,4 +128,4 @@ For parallel asset generation and declarative retries, this can be migrated to a
 
 ## License
 
-Internal demo project.
+[MIT](./LICENSE) © 2026 lubao

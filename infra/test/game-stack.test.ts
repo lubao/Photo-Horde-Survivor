@@ -99,3 +99,33 @@ test('eight lambda functions are created', () => {
   const fns = template.findResources('AWS::Lambda::Function');
   assert.ok(Object.keys(fns).length >= 8);
 });
+
+test('WAF web ACL (CLOUDFRONT) with rate limit is attached to the distribution', () => {
+  template.resourceCountIs('AWS::WAFv2::WebACL', 1);
+  template.hasResourceProperties('AWS::WAFv2::WebACL', {
+    Scope: 'CLOUDFRONT',
+    Rules: Match.arrayWith([
+      Match.objectLike({
+        Statement: Match.objectLike({
+          RateBasedStatement: Match.objectLike({ AggregateKeyType: 'IP' }),
+        }),
+      }),
+    ]),
+  });
+  const dists = template.findResources('AWS::CloudFront::Distribution');
+  const dist = Object.values(dists)[0] as any;
+  assert.ok(dist.Properties.DistributionConfig.WebACLId, 'distribution has WebACLId');
+});
+
+test('HTTP API stage has throttling and CORS is not wildcard', () => {
+  template.hasResourceProperties('AWS::ApiGatewayV2::Stage', {
+    DefaultRouteSettings: Match.objectLike({
+      ThrottlingBurstLimit: 20,
+      ThrottlingRateLimit: 50,
+    }),
+  });
+  const apis = template.findResources('AWS::ApiGatewayV2::Api');
+  const api = Object.values(apis)[0] as any;
+  const origins = api.Properties.CorsConfiguration.AllowOrigins;
+  assert.ok(!origins.includes('*'), `CORS must not be wildcard, got ${origins}`);
+});

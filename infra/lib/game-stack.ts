@@ -11,6 +11,7 @@ import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as wafv2 from 'aws-cdk-lib/aws-wafv2';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as path from 'path';
 
@@ -228,6 +229,15 @@ export class GameStack extends cdk.Stack {
     // -----------------------------------------------------------------
     // HTTP API Gateway
     // -----------------------------------------------------------------
+    // The deployed frontend calls the API same-origin via CloudFront (no CORS
+    // needed). CORS is therefore restricted to local-dev origins, with an
+    // optional `allowedOrigins` context override (comma-separated) for other
+    // hosts. No wildcard origin.
+    const ctxOrigins = this.node.tryGetContext('allowedOrigins') as string | undefined;
+    const allowOrigins = ctxOrigins
+      ? ctxOrigins.split(',').map((o) => o.trim()).filter(Boolean)
+      : ['http://localhost:8080'];
+
     const httpApi = new apigw.HttpApi(this, 'GameHttpApi', {
       corsPreflight: {
         allowHeaders: ['content-type', 'authorization'],
@@ -236,10 +246,17 @@ export class GameStack extends cdk.Stack {
           apigw.CorsHttpMethod.POST,
           apigw.CorsHttpMethod.OPTIONS,
         ],
-        allowOrigins: ['*'],
+        allowOrigins,
         maxAge: cdk.Duration.days(1),
       },
     });
+
+    // Default-stage throttling to blunt brute-force / cost-amplification.
+    const cfnStage = httpApi.defaultStage?.node.defaultChild as apigw.CfnStage;
+    cfnStage.defaultRouteSettings = {
+      throttlingBurstLimit: 20,
+      throttlingRateLimit: 50,
+    };
 
     // -----------------------------------------------------------------
     // CloudFront distribution (created before the user pool client so the
@@ -252,8 +269,53 @@ export class GameStack extends cdk.Stack {
 
     const apiDomain = `${httpApi.apiId}.execute-api.${this.region}.amazonaws.com`;
 
+    // WAF (CLOUDFRONT scope) protects the whole app — including /api/* which
+    // flows through CloudFront — since WAFv2 cannot attach to HTTP APIs directly.
+    // Must be created in us-east-1 (CLOUDFRONT scope), which is this stack's region.
+    const webAcl = new wafv2.CfnWebACL(this, 'WebAcl', {
+      scope: 'CLOUDFRONT',
+      defaultAction: { allow: {} },
+      visibilityConfig: {
+        cloudWatchMetricsEnabled: true,
+        metricName: 'PhotoHordeWebAcl',
+        sampledRequestsEnabled: true,
+      },
+      rules: [
+        {
+          name: 'AWSCommonRuleSet',
+          priority: 0,
+          overrideAction: { none: {} },
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: 'AWS',
+              name: 'AWSManagedRulesCommonRuleSet',
+            },
+          },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'AWSCommonRuleSet',
+            sampledRequestsEnabled: true,
+          },
+        },
+        {
+          name: 'RateLimitPerIp',
+          priority: 1,
+          action: { block: {} },
+          statement: {
+            rateBasedStatement: { limit: 1000, aggregateKeyType: 'IP' },
+          },
+          visibilityConfig: {
+            cloudWatchMetricsEnabled: true,
+            metricName: 'RateLimitPerIp',
+            sampledRequestsEnabled: true,
+          },
+        },
+      ],
+    });
+
     const distribution = new cloudfront.Distribution(this, 'Distribution', {
       defaultRootObject: 'index.html',
+      webAclId: webAcl.attrArn,
       defaultBehavior: {
         origin: origins.S3BucketOrigin.withOriginAccessIdentity(webBucket, {
           originAccessIdentity: webOAI,
