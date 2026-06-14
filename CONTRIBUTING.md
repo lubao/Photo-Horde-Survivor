@@ -32,22 +32,12 @@ git checkout develop && git merge --no-ff release/1.0.0
 - No build step for the frontend — it's vanilla ES modules served statically.
 - CDK app is TypeScript (`infra/`).
 
-## AWS profile (`web-game`)
+## AWS credentials
 
-Add to `~/.aws/config`:
-
-```ini
-[profile web-game]
-credential_process = ada credentials print --account 253988640130 --role Admin --format json
-region = us-east-1
-output = json
-```
-
-Verify:
-
-```bash
-aws sts get-caller-identity --profile web-game
-```
+Configure AWS credentials for your account (a named profile is recommended) and
+deploy with `--profile <your-profile>`. The stack targets `us-east-1` by default
+(see `infra/bin/app.ts`); ensure Bedrock model access for
+`amazon.nova-canvas-v1:0` is enabled in that region.
 
 ## Verify before pushing
 
