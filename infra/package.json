@@ -1,6 +1,6 @@
 {
   "name": "photo-horde-survivor-infra",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "bin": {
     "infra": "bin/app.js"
