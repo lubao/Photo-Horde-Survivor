@@ -1,0 +1,17 @@
+{
+  "name": "photo-horde-survivor-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lambda handlers for Photo Horde Survivor",
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.620.0",
+    "@aws-sdk/client-dynamodb": "^3.620.0",
+    "@aws-sdk/client-s3": "^3.620.0",
+    "@aws-sdk/lib-dynamodb": "^3.620.0",
+    "@aws-sdk/s3-request-presigner": "^3.620.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0"
+  }
+}

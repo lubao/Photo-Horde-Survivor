@@ -1,0 +1,27 @@
+{
+  "name": "photo-horde-survivor-infra",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "infra": "bin/app.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "synth": "cdk synth",
+    "deploy": "cdk deploy --require-approval never",
+    "diff": "cdk diff",
+    "destroy": "cdk destroy"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "aws-cdk": "^2.150.0",
+    "esbuild": "^0.23.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.150.0",
+    "constructs": "^10.3.0"
+  }
+}

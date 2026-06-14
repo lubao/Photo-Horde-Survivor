@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# CDK
+infra/cdk.out/
+infra/*.js
+infra/*.d.ts
+!infra/jest.config.js
+.cdk.staging/
+
+# Build artifacts
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+
+# Env / local config
+.env
+.env.local
+*.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Frontend runtime config (generated from CDK outputs)
+frontend/src/config.generated.js
+
+# Temp
+tmp/
+.tmp/

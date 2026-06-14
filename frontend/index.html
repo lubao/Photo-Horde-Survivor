@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Photo Horde Survivor · 照片割草</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <h1>🌾 照片割草 <span class="sub">Photo Horde Survivor</span></h1>
+      <nav>
+        <button class="navbtn active" data-view="play">遊玩 Play</button>
+        <button class="navbtn" data-view="leaderboard">排行榜 Leaderboard</button>
+        <button class="navbtn" data-view="gallery">作品集 Gallery</button>
+      </nav>
+    </header>
+
+    <!-- ============ PLAY VIEW ============ -->
+    <main id="view-play" class="view active">
+
+      <!-- Step 1: upload -->
+      <section id="screen-upload" class="screen active card">
+        <h2>1 · 上傳你的照片</h2>
+        <p class="muted">後端會用 <strong>AWS Bedrock Nova Canvas</strong> 依你的照片自動生成「主角 / 敵人 / 子彈 / 地圖背景」。</p>
+        <label class="field">
+          <span>玩家名稱 Player name</span>
+          <input id="playerName" type="text" maxlength="24" placeholder="Anonymous" />
+        </label>
+        <div id="dropzone" class="dropzone">
+          <input id="fileInput" type="file" accept="image/*" hidden />
+          <img id="previewImg" alt="preview" hidden />
+          <p id="dropHint">點此或拖曳照片到這裡<br /><small>Click or drop a photo</small></p>
+        </div>
+        <label class="check">
+          <input id="allowGallery" type="checkbox" />
+          <span>我同意把生成作品公開到 Gallery (I allow sharing my AIGC creation publicly)</span>
+        </label>
+        <div class="row">
+          <button id="generateBtn" class="primary" disabled>✨ 生成資產 Generate assets</button>
+          <button id="skipBtn" class="ghost">略過，用預設圖玩 Play with defaults</button>
+        </div>
+      </section>
+
+      <!-- Step 2: generating -->
+      <section id="screen-generating" class="screen card">
+        <h2>2 · 生成中…</h2>
+        <div class="spinner"></div>
+        <ul id="genLog" class="genlog"></ul>
+      </section>
+
+      <!-- Step 3: choose (only once) -->
+      <section id="screen-choose" class="screen card">
+        <h2>3 · 選擇你的風格 <span class="warn">只能選一次！Choose once</span></h2>
+        <div id="choices" class="choices"></div>
+      </section>
+
+      <!-- Step 4: game -->
+      <section id="screen-game" class="screen">
+        <div class="hud">
+          <div class="hud-item">❤️ <span id="hudHealth">100</span></div>
+          <div class="hud-item">⏱️ <span id="hudTime">0</span>s</div>
+          <div class="hud-item">💀 <span id="hudKills">0</span></div>
+          <div class="hud-item">⭐ <span id="hudScore">0</span></div>
+        </div>
+        <canvas id="game" width="900" height="560"></canvas>
+        <p class="muted controls-hint">移動：WASD / 方向鍵 / 滑鼠 · 自動開火 Auto-fire</p>
+      </section>
+
+      <!-- Step 5: game over -->
+      <section id="screen-over" class="screen card">
+        <h2>遊戲結束 Game Over</h2>
+        <p class="bigscore">⭐ <span id="finalScore">0</span></p>
+        <p class="muted">存活 <span id="finalTime">0</span> 秒 · 擊殺 <span id="finalKills">0</span></p>
+        <div class="row">
+          <button id="submitScoreBtn" class="primary">提交分數 Submit score</button>
+          <button id="replayBtn" class="ghost">再玩一次 Play again</button>
+        </div>
+        <p id="submitMsg" class="muted"></p>
+      </section>
+    </main>
+
+    <!-- ============ LEADERBOARD VIEW ============ -->
+    <section id="view-leaderboard" class="view">
+      <div class="card">
+        <h2>🏆 排行榜 Leaderboard</h2>
+        <table class="board">
+          <thead><tr><th>#</th><th>玩家 Player</th><th>風格 Style</th><th>分數 Score</th></tr></thead>
+          <tbody id="boardBody"><tr><td colspan="4" class="muted">載入中… Loading</td></tr></tbody>
+        </table>
+        <button id="refreshBoard" class="ghost">重新整理 Refresh</button>
+      </div>
+    </section>
+
+    <!-- ============ GALLERY VIEW ============ -->
+    <section id="view-gallery" class="view">
+      <div class="card">
+        <h2>🖼️ 作品集 Gallery <span class="sub">玩家同意公開的 AIGC 作品</span></h2>
+        <div id="galleryGrid" class="gallery-grid"><p class="muted">載入中… Loading</p></div>
+        <button id="refreshGallery" class="ghost">重新整理 Refresh</button>
+      </div>
+    </section>
+
+    <footer class="foot">
+      <span>Bedrock Nova Canvas · CDK · DynamoDB · S3 · CloudFront</span>
+    </footer>
+  </div>
+
+  <script src="src/config.js"></script>
+  <script src="src/api.js"></script>
+  <script src="src/game.js"></script>
+  <script src="src/main.js"></script>
+</body>
+</html>
