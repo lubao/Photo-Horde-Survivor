@@ -11,7 +11,9 @@
     "synth": "cdk synth",
     "deploy": "cdk deploy --require-approval never",
     "diff": "cdk diff",
-    "destroy": "cdk destroy"
+    "destroy": "cdk destroy",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/*.test.js",
+    "verify": "npm test"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

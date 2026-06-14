@@ -1,45 +1,22 @@
-// GET /api/gallery -> public AIGC creations (only those the player opted in to share)
-import { GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { s3, ddb, env, ok, fail } from '../shared/common.mjs';
+// GET /api/gallery — public. Returns only creations where the player opted in
+// (allowGallery === true, surfaced via the gallery GSI). Never exposes the
+// user's raw photo — only the generated hero sprite thumbnail.
+import { ok } from '../shared/common.mjs';
+import { listGallery } from '../shared/data.mjs';
+import { presignAssetGet } from '../shared/storage.mjs';
 
-const SIGN_TTL = 60 * 60 * 6;
-
-function signKey(key) {
-  return getSignedUrl(s3, new GetObjectCommand({ Bucket: env.ASSETS_BUCKET, Key: key }), { expiresIn: SIGN_TTL });
-}
-
-export const handler = async () => {
-  try {
-    const res = await ddb.send(new QueryCommand({
-      TableName: env.GENERATIONS_TABLE,
-      IndexName: 'gallery-index',
-      KeyConditionExpression: 'galleryPublic = :y',
-      ExpressionAttributeValues: { ':y': 'Y' },
-      ScanIndexForward: false, // newest first
-      Limit: 30,
-    }));
-
-    const items = await Promise.all((res.Items || []).map(async (it) => {
-      const base = `assets/generations/${it.generationId}/${it.selectedVariant}`;
-      const [hero, background] = await Promise.all([
-        signKey(`${base}/hero.png`),
-        signKey(`${base}/background.png`).catch(() => null),
-      ]);
-      return {
-        generationId: it.generationId,
-        playerName: it.playerName,
-        style: it.selectedVariant,
-        createdAt: it.createdAt,
-        heroUrl: hero,
-        backgroundUrl: background,
-      };
-    }));
-
-    return ok({ items });
-  } catch (err) {
-    console.error('gallery error', err);
-    return fail(err.message || 'gallery failed', 500);
+export async function handler() {
+  const items = await listGallery(30);
+  const creations = [];
+  for (const it of items) {
+    const thumbKey = it.galleryThumb || it.assetPack?.heroKey;
+    creations.push({
+      generationId: it.generationId,
+      playerName: it.galleryPlayer || it.playerName || 'Player',
+      style: it.galleryStyle || it.selectedVariantId || '',
+      createdAt: it.completedAt || it.createdAt,
+      thumbUrl: thumbKey ? await presignAssetGet(thumbKey) : null,
+    });
   }
-};
+  return ok({ creations });
+}

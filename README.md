@@ -1,40 +1,56 @@
 # 🌾 Photo Horde Survivor · 照片割草
 
-A web-based **horde-survivor ("割草") game** where the player's uploaded **photo** is turned into the game's **hero, enemies, bullets, and map background** using **AWS Bedrock Nova Canvas**. The backend generates **3 style choices** and the player picks **exactly one (final, once only)**. Includes a **leaderboard** and an opt-in **gallery** of AIGC creations.
+A web-based **horde-survivor ("割草") game** where the player's uploaded **photo** is
+turned into the game's **hero, enemies, bullets, and map background** using
+**AWS Bedrock Nova Canvas**. The backend generates **3 hero style choices**,
+narrates each generation step, and the player picks **exactly one (final, once
+only)**. Includes a **leaderboard** and an opt-in **gallery** of AIGC creations.
 
 ```
-Browser (Canvas game) ──HTTPS──► CloudFront ──► S3 (static web)
-                                      │
-                                      ├─ /assets/* ─► S3 (generated assets)
-                                      └─ /api/*    ─► HTTP API Gateway ─► Lambda
-                                                                          ├─ generateAssets ─► Bedrock Nova Canvas
-                                                                          ├─ selectAsset    ─► Bedrock + DynamoDB (single-selection lock)
-                                                                          ├─ scores         ─► DynamoDB (Leaderboard)
-                                                                          └─ gallery        ─► DynamoDB (gallery GSI)
+Browser (HTML5 Canvas + Cognito Hosted UI)
+        │  HTTPS
+        ▼
+   CloudFront ──► S3 (static web)
+        ├─ /assets/* ─► S3 (generated assets, private via OAI)
+        └─ /api/*    ─► HTTP API Gateway (JWT authorizer)
+                              ├─ POST /upload-url          presign S3 PUT
+                              ├─ POST /generate            quota + async worker
+                              ├─ GET  /generate/{id}/status poll narration + previews
+                              ├─ POST /select              single-selection lock
+                              ├─ GET/POST /scores          leaderboard
+                              └─ GET  /gallery             opted-in creations
+                                   │ (async Event invoke)
+                                   ▼
+                          Generation Worker Lambda ─► Bedrock Nova Canvas
+                                                   ─► S3 assets + DynamoDB steps
 ```
 
-## Features
+## How it works
 
-- 📷 **Photo → game assets**: upload a photo, Bedrock Nova Canvas (`amazon.nova-canvas-v1:0`) generates themed assets via `IMAGE_VARIATION`.
-- 🎨 **3 styles, choose once**: backend returns 3 styled hero previews (Neon / Pixel / Cartoon). Selection is locked atomically in DynamoDB — **you can only choose once**.
-- 🧹 **Horde-survivor gameplay**: WASD/arrows/mouse/touch movement, auto-fire at nearest enemy, escalating waves, health & score.
-- 🏆 **Leaderboard**: top scores in DynamoDB.
-- 🖼️ **Gallery**: only creations where the player explicitly opted in to share are shown.
-- ☁️ **Infrastructure-as-code**: full AWS CDK stack.
+1. **Sign in** with Cognito Hosted UI.
+2. **Upload a photo** — the browser resizes it and PUTs it to S3 via a presigned URL.
+3. **Generate** — a daily-quota check passes, a generation record is created, and an
+   async **worker Lambda** calls Nova Canvas `IMAGE_VARIATION` to make **3 styled hero
+   previews** (Neon / Pixel / Cartoon), cleaned with `BACKGROUND_REMOVAL`.
+4. **Watch the narration** — the frontend polls `/status` and shows a live progress log
+   (analyzing photo → generating hero variants → cleaning sprites → ready).
+5. **Choose once** — selection is locked atomically in DynamoDB (`409` on any repeat).
+   Selecting kicks off the async **assets phase** that generates the enemy, bullet, and
+   background for the chosen style.
+6. **Play** — a horde-survivor loop using your generated sprites; submit your score.
+7. **Gallery** — if you opted in, your creation appears in the public gallery (generated
+   art only — never your raw photo).
 
 ## Repository layout
 
 ```
 photo-horde-survivor/
-├── infra/        # AWS CDK app (TypeScript)
-│   ├── bin/app.ts
-│   └── lib/game-stack.ts
-├── backend/      # Lambda handlers (Node.js 20, ESM)
-│   ├── shared/common.mjs
-│   └── handlers/{generateAssets,selectAsset,scores,gallery}.mjs
-└── frontend/     # Static web game (HTML5 Canvas, vanilla JS)
-    ├── index.html, styles.css
-    └── src/{config,api,game,main}.js
+├── infra/        # AWS CDK app (TypeScript) + CDK assertion tests
+├── backend/      # Lambda handlers (Node 20 ESM) + unit tests (node:test)
+│   ├── shared/   # common · nova · data · storage
+│   └── handlers/ # health uploadUrl generate worker status select scores gallery
+└── frontend/     # Static HTML5 Canvas game (vanilla ES modules) + logic tests
+    └── src/      # config auth api logic flow game main
 ```
 
 ## Prerequisites
@@ -52,70 +68,75 @@ region = us-east-1
 output = json
 ```
 
-Verify:
-
 ```bash
 aws sts get-caller-identity --profile web-game
 ```
 
-## Deploy
+## Test
+
+From the repo root (runs backend + frontend + infra suites):
 
 ```bash
-# 1. install dependencies
-cd backend && npm install && cd ..
-cd infra && npm install
+npm run verify
+```
 
-# 2. bootstrap (first time only, per account/region)
+## Deploy
+
+> ⚠️ Deploys real, billable resources to account `253988640130`. Ensure Bedrock model
+> access for `amazon.nova-canvas-v1:0` is enabled first.
+
+```bash
+cd backend && npm install && cd ..
+cd infra   && npm install
+
+# first time per account/region only
 npx cdk bootstrap --profile web-game
 
-# 3. deploy
 npx cdk deploy --profile web-game --require-approval never
 ```
 
-CDK outputs `SiteUrl` (CloudFront URL) — open it to play. The frontend is deployed
-to S3 and served via CloudFront; `/api/*` and `/assets/*` are routed by the same distribution.
+CDK outputs `SiteUrl` (CloudFront). The frontend `config.json` (API base + Cognito IDs)
+is generated and deployed automatically. Open `SiteUrl`, sign in, and play.
 
 ### Local frontend testing
 
 ```bash
-cd frontend && python3 -m http.server 8080
-# open http://localhost:8080/?api=<ApiEndpoint-from-cdk-output>
+cd frontend && npm run serve   # http://localhost:8080
 ```
-Use **"略過，用預設圖玩 / Play with defaults"** to test gameplay without calling Bedrock.
+
+Use **"略過，用預設圖玩 / Play with defaults"** to test gameplay without Bedrock or
+sign-in. To exercise the API locally, pass overrides:
+`http://localhost:8080/?api=<ApiEndpoint>&userPoolId=...&clientId=...&domain=...`
 
 ## API
 
-| Method | Path           | Description                                             |
-|--------|----------------|---------------------------------------------------------|
-| POST   | `/api/generate`| `{ imageBase64, playerName?, allowGallery? }` → 3 styles |
-| POST   | `/api/select`  | `{ generationId, variantId }` → full asset pack (once)  |
-| GET    | `/api/scores`  | Top 20 leaderboard entries                              |
-| POST   | `/api/scores`  | `{ playerName, score, style?, generationId? }`          |
-| GET    | `/api/gallery` | Opted-in public AIGC creations                          |
-
-## Gitflow
-
-This repo follows **gitflow**:
-
-- `main` — production-ready, tagged releases.
-- `develop` — integration branch (default working branch).
-- `feature/*` — branch off `develop`, merge back into `develop`.
-- `release/*` — stabilize a release, merge into `main` + `develop`.
-- `hotfix/*` — urgent fixes off `main`.
-
-```bash
-git checkout develop
-git checkout -b feature/my-change
-# ...work...
-git checkout develop && git merge --no-ff feature/my-change
-```
+| Method | Path                         | Auth | Description                                  |
+|--------|------------------------------|------|----------------------------------------------|
+| GET    | `/api/health`                | —    | Health check                                 |
+| POST   | `/api/upload-url`            | JWT  | Presigned S3 PUT URL for the photo           |
+| POST   | `/api/generate`              | JWT  | Quota check + async hero generation → id     |
+| GET    | `/api/generate/{id}/status`  | JWT  | Steps, hero previews, asset pack (owner-only) |
+| POST   | `/api/select`                | JWT  | Lock one variant (once) + async asset build  |
+| GET    | `/api/scores`                | —    | Top 20 leaderboard                            |
+| POST   | `/api/scores`                | JWT  | Submit a validated score                      |
+| GET    | `/api/gallery`               | —    | Opted-in public AIGC creations                |
 
 ## Cost & safety notes
 
-- Bedrock image generation is billed per image. `/generate` produces 3 images; `/select` produces 3 more (enemy, bullet, background) for the chosen style only.
-- S3 uploads bucket auto-expires raw photos after 7 days; generation records have a 30-day TTL until a selection is finalized.
-- All buckets are private (Block Public Access); assets are served via presigned URLs / CloudFront OAI.
-- Gallery only ever shows creations where `allowGallery === true`.
+- Bedrock image generation is billed per image: `/generate` produces 3 hero images
+  (plus background-removal calls); selecting produces 3 more (enemy, bullet, background)
+  for the chosen style only.
+- **Per-user daily quota** (default 10/day) is enforced atomically in DynamoDB.
+- Raw uploads auto-expire after **7 days**; unfinished generations have a 30-day TTL.
+- All S3 buckets block public access; assets are served via CloudFront OAI / presigned URLs.
+- The API is protected by a Cognito JWT authorizer; only the leaderboard and gallery
+  reads are public. The gallery only ever shows creations where `allowGallery === true`.
+
+## Future upgrade path
+
+The async generation runs in a single worker Lambda (simple, fully covered by polling).
+For parallel asset generation and declarative retries, this can be migrated to a
+**Step Functions Express workflow** with a `Map`/`Parallel` state — see `ARCHITECTURE.md`.
 
 ## License
 

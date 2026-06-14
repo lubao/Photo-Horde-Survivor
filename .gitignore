@@ -7,6 +7,7 @@ infra/cdk.out/
 infra/*.js
 infra/*.d.ts
 !infra/jest.config.js
+infra/dist-test/
 .cdk.staging/
 
 # Build artifacts
