@@ -2,6 +2,7 @@
   "name": "photo-horde-survivor-frontend",
   "version": "1.0.1",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Static HTML5 Canvas frontend for Photo Horde Survivor",
   "scripts": {

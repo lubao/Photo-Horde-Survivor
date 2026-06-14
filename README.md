@@ -140,4 +140,4 @@ For parallel asset generation and declarative retries, this can be migrated to a
 
 ## License
 
-Internal demo project.
+[MIT](./LICENSE) © 2026 lubao

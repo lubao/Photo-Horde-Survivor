@@ -2,6 +2,7 @@
   "name": "photo-horde-survivor-infra",
   "version": "1.0.1",
   "private": true,
+  "license": "MIT",
   "bin": {
     "infra": "bin/app.js"
   },
