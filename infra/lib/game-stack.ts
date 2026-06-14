@@ -159,6 +159,10 @@ export class GameStack extends cdk.Stack {
         target: 'node20',
         minify: false,
         externalModules: [],
+        // ESM output has no `require`; the AWS SDK's bundled CommonJS deps call
+        // require("buffer") etc. at runtime. Inject a createRequire shim.
+        banner:
+          "import{createRequire as __cr}from'module';const require=__cr(import.meta.url);",
       },
       environment: baseEnv,
     };
