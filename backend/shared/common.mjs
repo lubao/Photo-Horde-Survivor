@@ -32,21 +32,19 @@ export const env = {
   PRESIGN_TTL_SECONDS: Number(process.env.PRESIGN_TTL_SECONDS || '3600'),
 };
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'content-type,authorization',
-  'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-  'Content-Type': 'application/json',
-};
+// CORS is managed by API Gateway's HTTP API CORS configuration (restricted to
+// the allowed origins). Handlers only set Content-Type so there is no duplicate
+// or wildcard Access-Control-Allow-Origin header on responses.
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 export function ok(body, statusCode = 200) {
-  return { statusCode, headers: CORS, body: JSON.stringify(body) };
+  return { statusCode, headers: JSON_HEADERS, body: JSON.stringify(body) };
 }
 
 export function fail(message, statusCode = 400, extra = {}) {
   return {
     statusCode,
-    headers: CORS,
+    headers: JSON_HEADERS,
     body: JSON.stringify({ error: message, ...extra }),
   };
 }
