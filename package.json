@@ -1,0 +1,15 @@
+{
+  "name": "photo-horde-survivor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web horde-survivor game: uploaded photos drive Bedrock Nova Canvas asset generation. Cognito auth, leaderboard, opt-in gallery. Deployed via AWS CDK.",
+  "scripts": {
+    "verify": "npm --prefix backend test && npm --prefix frontend test && npm --prefix infra test",
+    "test": "npm run verify",
+    "synth": "npm --prefix infra run synth",
+    "deploy": "npm --prefix infra run deploy -- --profile web-game"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

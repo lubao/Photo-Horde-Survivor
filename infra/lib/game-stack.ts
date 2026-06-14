@@ -7,33 +7,34 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as apigw from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigwInteg from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as path from 'path';
 
 /**
- * PhotoHordeSurvivor infrastructure.
+ * Photo Horde Survivor infrastructure.
  *
- * Resources:
- *  - S3 "uploads"  : raw user photos (private, lifecycle-expired)
- *  - S3 "assets"   : AI-generated game assets (private, served via CloudFront)
- *  - S3 "web"      : static frontend (served via CloudFront)
- *  - DynamoDB "generations" : tracks each generation + single-selection lock + gallery opt-in
- *  - DynamoDB "leaderboard" : high scores
- *  - Lambda x4     : generateAssets, selectAsset, scores, gallery
- *  - HTTP API Gateway -> Lambdas
- *  - CloudFront    : single distribution for web + /assets/* + /api/*
+ *  S3      : uploads (7d expiry) · assets (private) · web (static site)
+ *  DynamoDB: generations (+gallery GSI) · scores (+score GSI) · quota (TTL)
+ *  Cognito : user pool + hosted UI + app client; JWT authorizer on the API
+ *  Lambda  : health · uploadUrl · generate · status · select · scores · gallery
+ *            + async generation worker (Bedrock Nova Canvas)
+ *  API GW  : HTTP API; public reads (health/scores/gallery) + JWT-protected
+ *  CFront  : one distribution -> web (default), /assets/* , /api/*
  */
 export class GameStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
     const NOVA_MODEL_ID = 'amazon.nova-canvas-v1:0';
+    const DAILY_QUOTA = '10';
 
-    // ---------------------------------------------------------------
-    // Storage: S3 buckets
-    // ---------------------------------------------------------------
+    // -----------------------------------------------------------------
+    // S3 buckets
+    // -----------------------------------------------------------------
     const uploadsBucket = new s3.Bucket(this, 'UploadsBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
@@ -43,7 +44,7 @@ export class GameStack extends cdk.Stack {
       lifecycleRules: [{ expiration: cdk.Duration.days(7) }],
       cors: [
         {
-          allowedMethods: [s3.HttpMethods.PUT, s3.HttpMethods.GET],
+          allowedMethods: [s3.HttpMethods.PUT],
           allowedOrigins: ['*'],
           allowedHeaders: ['*'],
           maxAge: 3000,
@@ -67,35 +68,86 @@ export class GameStack extends cdk.Stack {
       autoDeleteObjects: true,
     });
 
-    // ---------------------------------------------------------------
-    // Data: DynamoDB tables
-    // ---------------------------------------------------------------
+    // -----------------------------------------------------------------
+    // DynamoDB tables
+    // -----------------------------------------------------------------
     const generationsTable = new dynamodb.Table(this, 'GenerationsTable', {
       partitionKey: { name: 'generationId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       timeToLiveAttribute: 'ttl',
     });
-
-    // GSI to query public gallery items by creation time
+    // Gallery query: only opted-in items set galleryPublic='Y', newest first.
     generationsTable.addGlobalSecondaryIndex({
       indexName: 'gallery-index',
       partitionKey: { name: 'galleryPublic', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'completedAt', type: dynamodb.AttributeType.STRING },
     });
 
-    const leaderboardTable = new dynamodb.Table(this, 'LeaderboardTable', {
+    const scoresTable = new dynamodb.Table(this, 'ScoresTable', {
       partitionKey: { name: 'board', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'scoreId', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
+    // Leaderboard query: top scores per board, numeric sort descending.
+    scoresTable.addGlobalSecondaryIndex({
+      indexName: 'score-index',
+      partitionKey: { name: 'board', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'score', type: dynamodb.AttributeType.NUMBER },
+    });
 
-    // ---------------------------------------------------------------
+    const quotaTable = new dynamodb.Table(this, 'QuotaTable', {
+      partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      timeToLiveAttribute: 'ttl',
+    });
+
+    // -----------------------------------------------------------------
+    // Cognito user pool + hosted UI + app client
+    // -----------------------------------------------------------------
+    const userPool = new cognito.UserPool(this, 'UserPool', {
+      selfSignUpEnabled: true,
+      signInAliases: { email: true },
+      autoVerify: { email: true },
+      standardAttributes: { email: { required: true, mutable: true } },
+      passwordPolicy: { minLength: 8, requireDigits: true, requireLowercase: true },
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    userPool.addDomain('HostedUI', {
+      cognitoDomain: { domainPrefix: `phorde-${this.account}` },
+    });
+
+    // -----------------------------------------------------------------
     // Lambda functions
-    // ---------------------------------------------------------------
-    const handlersDir = path.join(__dirname, '..', '..', 'backend', 'handlers');
-    const backendDir = path.join(__dirname, '..', '..', 'backend');
+    // -----------------------------------------------------------------
+    // Resolve the backend dir robustly whether this file runs from lib/
+    // (ts-node via cdk) or from a compiled test output dir. Walk up until a
+    // sibling "backend/handlers" directory is found.
+    const findBackendDir = (): string => {
+      let dir = __dirname;
+      for (let i = 0; i < 6; i++) {
+        const candidate = path.join(dir, 'backend');
+        if (require('fs').existsSync(path.join(candidate, 'handlers'))) return candidate;
+        dir = path.join(dir, '..');
+      }
+      return path.join(__dirname, '..', '..', 'backend');
+    };
+    const backendDir = findBackendDir();
+    const handlersDir = path.join(backendDir, 'handlers');
+
+    const baseEnv = {
+      UPLOADS_BUCKET: uploadsBucket.bucketName,
+      ASSETS_BUCKET: assetsBucket.bucketName,
+      GENERATIONS_TABLE: generationsTable.tableName,
+      SCORES_TABLE: scoresTable.tableName,
+      QUOTA_TABLE: quotaTable.tableName,
+      NOVA_MODEL_ID,
+      DAILY_QUOTA,
+      NODE_OPTIONS: '--enable-source-maps',
+    };
 
     const commonFnProps = {
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -106,76 +158,72 @@ export class GameStack extends cdk.Stack {
         format: cdk.aws_lambda_nodejs.OutputFormat.ESM,
         target: 'node20',
         minify: false,
-        // The Bedrock SDK client is NOT guaranteed in the Lambda runtime, so we
-        // bundle ALL modules (externalModules: []) from backend/node_modules.
         externalModules: [],
       },
-      environment: {
-        UPLOADS_BUCKET: uploadsBucket.bucketName,
-        ASSETS_BUCKET: assetsBucket.bucketName,
-        GENERATIONS_TABLE: generationsTable.tableName,
-        LEADERBOARD_TABLE: leaderboardTable.tableName,
-        NOVA_MODEL_ID,
-        NODE_OPTIONS: '--enable-source-maps',
-      },
+      environment: baseEnv,
     };
 
-    const generateFn = new NodejsFunction(this, 'GenerateAssetsFn', {
-      ...commonFnProps,
-      entry: path.join(handlersDir, 'generateAssets.mjs'),
-      handler: 'handler',
-      timeout: cdk.Duration.seconds(120),
-      memorySize: 1024,
+    const fn = (
+      logicalId: string,
+      entry: string,
+      opts: { timeout?: number; memory?: number; env?: Record<string, string> } = {},
+    ) =>
+      new NodejsFunction(this, logicalId, {
+        ...commonFnProps,
+        entry: path.join(handlersDir, entry),
+        handler: 'handler',
+        timeout: cdk.Duration.seconds(opts.timeout ?? 15),
+        memorySize: opts.memory ?? 256,
+        environment: { ...baseEnv, ...(opts.env ?? {}) },
+      });
+
+    const healthFn = fn('HealthFn', 'health.mjs');
+    const uploadUrlFn = fn('UploadUrlFn', 'uploadUrl.mjs');
+    const statusFn = fn('StatusFn', 'status.mjs');
+    const scoresFn = fn('ScoresFn', 'scores.mjs');
+    const galleryFn = fn('GalleryFn', 'gallery.mjs');
+
+    // Async worker performs the slow Bedrock calls (up to ~5 min).
+    const workerFn = fn('WorkerFn', 'worker.mjs', { timeout: 300, memory: 1024 });
+
+    // Kickoff handlers need the worker function name to async-invoke it.
+    const generateFn = fn('GenerateFn', 'generate.mjs', {
+      env: { WORKER_FUNCTION_NAME: workerFn.functionName },
+    });
+    const selectFn = fn('SelectFn', 'select.mjs', {
+      env: { WORKER_FUNCTION_NAME: workerFn.functionName },
     });
 
-    const selectFn = new NodejsFunction(this, 'SelectAssetFn', {
-      ...commonFnProps,
-      entry: path.join(handlersDir, 'selectAsset.mjs'),
-      handler: 'handler',
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 256,
-    });
-
-    const scoresFn = new NodejsFunction(this, 'ScoresFn', {
-      ...commonFnProps,
-      entry: path.join(handlersDir, 'scores.mjs'),
-      handler: 'handler',
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 256,
-    });
-
-    const galleryFn = new NodejsFunction(this, 'GalleryFn', {
-      ...commonFnProps,
-      entry: path.join(handlersDir, 'gallery.mjs'),
-      handler: 'handler',
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 256,
-    });
-
-    // ---------------------------------------------------------------
+    // -----------------------------------------------------------------
     // Permissions
-    // ---------------------------------------------------------------
-    uploadsBucket.grantReadWrite(generateFn);
-    assetsBucket.grantReadWrite(generateFn);
-    assetsBucket.grantReadWrite(selectFn);
-    generationsTable.grantReadWriteData(generateFn);
+    // -----------------------------------------------------------------
+    uploadsBucket.grantPut(uploadUrlFn); // presigned PUT requires role perms
+    uploadsBucket.grantRead(workerFn);
+    assetsBucket.grantReadWrite(workerFn);
+    assetsBucket.grantRead(statusFn);
+    assetsBucket.grantRead(galleryFn);
+
+    generationsTable.grantWriteData(generateFn);
+    generationsTable.grantReadWriteData(workerFn);
+    generationsTable.grantReadData(statusFn);
     generationsTable.grantReadWriteData(selectFn);
     generationsTable.grantReadData(galleryFn);
-    leaderboardTable.grantReadWriteData(scoresFn);
+    scoresTable.grantReadWriteData(scoresFn);
+    quotaTable.grantReadWriteData(generateFn);
 
-    // Bedrock Nova Canvas invoke permission (image generation)
-    generateFn.addToRolePolicy(
+    workerFn.grantInvoke(generateFn);
+    workerFn.grantInvoke(selectFn);
+
+    workerFn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['bedrock:InvokeModel'],
-        resources: [
-          `arn:aws:bedrock:${this.region}::foundation-model/${NOVA_MODEL_ID}`,
-        ],
+        resources: [`arn:aws:bedrock:${this.region}::foundation-model/${NOVA_MODEL_ID}`],
       }),
     );
 
-    // ---------------------------------------------------------------
+    // -----------------------------------------------------------------
     // HTTP API Gateway
-    // ---------------------------------------------------------------
+    // -----------------------------------------------------------------
     const httpApi = new apigw.HttpApi(this, 'GameHttpApi', {
       corsPreflight: {
         allowHeaders: ['content-type', 'authorization'],
@@ -189,27 +237,10 @@ export class GameStack extends cdk.Stack {
       },
     });
 
-    const route = (
-      p: string,
-      method: apigw.HttpMethod,
-      fn: lambda.IFunction,
-      integId: string,
-    ) =>
-      httpApi.addRoutes({
-        path: p,
-        methods: [method],
-        integration: new apigwInteg.HttpLambdaIntegration(integId, fn),
-      });
-
-    route('/api/generate', apigw.HttpMethod.POST, generateFn, 'genInteg');
-    route('/api/select', apigw.HttpMethod.POST, selectFn, 'selInteg');
-    route('/api/scores', apigw.HttpMethod.GET, scoresFn, 'scoresGetInteg');
-    route('/api/scores', apigw.HttpMethod.POST, scoresFn, 'scoresPostInteg');
-    route('/api/gallery', apigw.HttpMethod.GET, galleryFn, 'galleryInteg');
-
-    // ---------------------------------------------------------------
-    // CloudFront distribution (web + assets + api behind one origin)
-    // ---------------------------------------------------------------
+    // -----------------------------------------------------------------
+    // CloudFront distribution (created before the user pool client so the
+    // client's callback URLs can reference the distribution domain).
+    // -----------------------------------------------------------------
     const webOAI = new cloudfront.OriginAccessIdentity(this, 'WebOAI');
     webBucket.grantRead(webOAI);
     const assetsOAI = new cloudfront.OriginAccessIdentity(this, 'AssetsOAI');
@@ -241,7 +272,9 @@ export class GameStack extends cdk.Stack {
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
           allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
           cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-          originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_CUSTOM_ORIGIN,
+          // Forward the Authorization header (needed by the JWT authorizer).
+          originRequestPolicy:
+            cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
         },
       },
       errorResponses: [
@@ -250,24 +283,82 @@ export class GameStack extends cdk.Stack {
       ],
     });
 
-    // ---------------------------------------------------------------
-    // Deploy frontend static files to the web bucket
-    // ---------------------------------------------------------------
+    const siteUrl = `https://${distribution.distributionDomainName}`;
+
+    const userPoolClient = userPool.addClient('WebClient', {
+      generateSecret: false,
+      authFlows: { userSrp: true },
+      oAuth: {
+        flows: { authorizationCodeGrant: true, implicitCodeGrant: true },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
+        callbackUrls: [`${siteUrl}/`, 'http://localhost:8080/', 'http://localhost:8080/index.html'],
+        logoutUrls: [`${siteUrl}/`, 'http://localhost:8080/'],
+      },
+    });
+
+    // JWT authorizer validating Cognito access/ID tokens.
+    const jwtAuthorizer = new HttpJwtAuthorizer(
+      'JwtAuthorizer',
+      `https://cognito-idp.${this.region}.amazonaws.com/${userPool.userPoolId}`,
+      { jwtAudience: [userPoolClient.userPoolClientId] },
+    );
+
+    // -----------------------------------------------------------------
+    // Routes (public reads + JWT-protected writes/owner actions)
+    // -----------------------------------------------------------------
+    const integ = (idStr: string, f: lambda.IFunction) =>
+      new apigwInteg.HttpLambdaIntegration(idStr, f);
+
+    // Public
+    httpApi.addRoutes({ path: '/api/health', methods: [apigw.HttpMethod.GET], integration: integ('healthI', healthFn) });
+    httpApi.addRoutes({ path: '/api/scores', methods: [apigw.HttpMethod.GET], integration: integ('scoresGetI', scoresFn) });
+    httpApi.addRoutes({ path: '/api/gallery', methods: [apigw.HttpMethod.GET], integration: integ('galleryI', galleryFn) });
+
+    // Protected (JWT)
+    const protectedRoute = (p: string, m: apigw.HttpMethod, f: lambda.IFunction, idStr: string) =>
+      httpApi.addRoutes({ path: p, methods: [m], integration: integ(idStr, f), authorizer: jwtAuthorizer });
+
+    protectedRoute('/api/upload-url', apigw.HttpMethod.POST, uploadUrlFn, 'uploadI');
+    protectedRoute('/api/generate', apigw.HttpMethod.POST, generateFn, 'genI');
+    protectedRoute('/api/generate/{id}/status', apigw.HttpMethod.GET, statusFn, 'statusI');
+    protectedRoute('/api/select', apigw.HttpMethod.POST, selectFn, 'selI');
+    protectedRoute('/api/scores', apigw.HttpMethod.POST, scoresFn, 'scoresPostI');
+
+    // -----------------------------------------------------------------
+    // Deploy frontend + runtime config to the web bucket
+    // -----------------------------------------------------------------
     new s3deploy.BucketDeployment(this, 'DeployWeb', {
-      sources: [s3deploy.Source.asset(path.join(__dirname, '..', '..', 'frontend'))],
+      sources: [
+        s3deploy.Source.asset(path.join(backendDir, '..', 'frontend'), {
+          exclude: ['test', 'test/**', 'package.json', 'node_modules', 'node_modules/**'],
+        }),
+        s3deploy.Source.jsonData('config.json', {
+          apiBase: '/api',
+          region: this.region,
+          userPoolId: userPool.userPoolId,
+          userPoolClientId: userPoolClient.userPoolClientId,
+          hostedUiDomain: `phorde-${this.account}.auth.${this.region}.amazoncognito.com`,
+          redirectUri: `${siteUrl}/`,
+        }),
+      ],
       destinationBucket: webBucket,
       distribution,
       distributionPaths: ['/*'],
     });
 
-    // ---------------------------------------------------------------
+    // -----------------------------------------------------------------
     // Outputs
-    // ---------------------------------------------------------------
-    new cdk.CfnOutput(this, 'SiteUrl', { value: `https://${distribution.distributionDomainName}` });
+    // -----------------------------------------------------------------
+    new cdk.CfnOutput(this, 'SiteUrl', { value: siteUrl });
     new cdk.CfnOutput(this, 'ApiEndpoint', { value: httpApi.apiEndpoint });
+    new cdk.CfnOutput(this, 'UserPoolId', { value: userPool.userPoolId });
+    new cdk.CfnOutput(this, 'UserPoolClientId', { value: userPoolClient.userPoolClientId });
+    new cdk.CfnOutput(this, 'HostedUiDomain', {
+      value: `phorde-${this.account}.auth.${this.region}.amazoncognito.com`,
+    });
     new cdk.CfnOutput(this, 'AssetsBucketName', { value: assetsBucket.bucketName });
     new cdk.CfnOutput(this, 'UploadsBucketName', { value: uploadsBucket.bucketName });
     new cdk.CfnOutput(this, 'GenerationsTableName', { value: generationsTable.tableName });
-    new cdk.CfnOutput(this, 'LeaderboardTableName', { value: leaderboardTable.tableName });
+    new cdk.CfnOutput(this, 'ScoresTableName', { value: scoresTable.tableName });
   }
 }

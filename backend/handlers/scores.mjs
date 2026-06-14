@@ -1,67 +1,56 @@
-// GET  /api/scores            -> top 20 scores
-// POST /api/scores            -> submit a score { playerName, score, generationId?, style? }
-import { randomUUID } from 'crypto';
-import { PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
-import { ddb, env, ok, fail, parseBody } from '../shared/common.mjs';
+// /api/scores
+//   GET  — public. Returns the top 20 leaderboard entries (highest first).
+//   POST — authenticated. Submits a validated score.
+import { randomUUID } from 'node:crypto';
+import { ok, fail, parseBody, getUser } from '../shared/common.mjs';
+import { putScore, topScores } from '../shared/data.mjs';
 
-const BOARD = 'global';
+export const MAX_SCORE = 100_000_000;
 
-// Zero-pad so descending lexicographic sort == descending score.
-function scoreKey(score) {
-  const pad = String(Math.min(score, 999999999)).padStart(9, '0');
-  return `${pad}#${Date.now()}#${randomUUID().slice(0, 8)}`;
+function method(event) {
+  return event?.requestContext?.http?.method || event?.httpMethod || 'GET';
 }
 
-async function listTop(limit = 20) {
-  const res = await ddb.send(new QueryCommand({
-    TableName: env.LEADERBOARD_TABLE,
-    KeyConditionExpression: 'board = :b',
-    ExpressionAttributeValues: { ':b': BOARD },
-    ScanIndexForward: false, // descending -> highest scores first
-    Limit: limit,
-  }));
-  return (res.Items || []).map((it, idx) => ({
-    rank: idx + 1,
-    playerName: it.playerName,
-    score: it.score,
-    style: it.style || null,
-    createdAt: it.createdAt,
-  }));
-}
-
-export const handler = async (event) => {
-  try {
-    const method = event?.requestContext?.http?.method || 'GET';
-
-    if (method === 'GET') {
-      return ok({ board: BOARD, scores: await listTop(20) });
-    }
-
-    if (method === 'POST') {
-      const body = parseBody(event);
-      const score = Number(body.score);
-      if (!Number.isFinite(score) || score < 0) return fail('valid score is required');
-      const playerName = (body.playerName || 'Anonymous').toString().slice(0, 24);
-
-      await ddb.send(new PutCommand({
-        TableName: env.LEADERBOARD_TABLE,
-        Item: {
-          board: BOARD,
-          scoreId: scoreKey(Math.floor(score)),
-          playerName,
-          score: Math.floor(score),
-          style: body.style ? String(body.style).slice(0, 32) : undefined,
-          generationId: body.generationId,
-          createdAt: new Date().toISOString(),
-        },
-      }));
-
-      return ok({ submitted: true, scores: await listTop(20) });
-    }
-
-    return fail('method not allowed', 405);
-  } catch (err) {
-    console.error('scores error', err);
-    return fail(err.message || 'scores failed', 500);
+export function validateScore({ playerName, score }) {
+  if (typeof score !== 'number' || !Number.isFinite(score)) {
+    return { ok: false, reason: 'score must be a number' };
   }
-};
+  if (score < 0 || score > MAX_SCORE || !Number.isInteger(score)) {
+    return { ok: false, reason: 'score out of range' };
+  }
+  if (playerName && String(playerName).length > 40) {
+    return { ok: false, reason: 'playerName too long' };
+  }
+  return { ok: true };
+}
+
+export async function handler(event) {
+  if (method(event) === 'POST') {
+    const user = getUser(event);
+    if (!user) return fail('Unauthorized', 401);
+
+    const body = parseBody(event);
+    const check = validateScore(body);
+    if (!check.ok) return fail(check.reason, 422);
+
+    const item = await putScore({
+      scoreId: randomUUID(),
+      playerName: body.playerName,
+      score: body.score,
+      style: body.style,
+      generationId: body.generationId,
+      ownerSub: user.sub,
+    });
+    return ok({ submitted: true, score: item.score }, 201);
+  }
+
+  const scores = await topScores(20);
+  return ok({
+    scores: scores.map((s) => ({
+      playerName: s.playerName,
+      score: s.score,
+      style: s.style,
+      createdAt: s.createdAt,
+    })),
+  });
+}
