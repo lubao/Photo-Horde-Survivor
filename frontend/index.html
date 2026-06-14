@@ -15,6 +15,11 @@
         <button class="navbtn" data-view="leaderboard">排行榜 Leaderboard</button>
         <button class="navbtn" data-view="gallery">作品集 Gallery</button>
       </nav>
+      <div class="auth">
+        <span id="authStatus" class="muted"></span>
+        <button id="loginBtn" class="ghost">登入 Sign in</button>
+        <button id="logoutBtn" class="ghost" hidden>登出 Sign out</button>
+      </div>
     </header>
 
     <!-- ============ PLAY VIEW ============ -->
@@ -24,6 +29,7 @@
       <section id="screen-upload" class="screen active card">
         <h2>1 · 上傳你的照片</h2>
         <p class="muted">後端會用 <strong>AWS Bedrock Nova Canvas</strong> 依你的照片自動生成「主角 / 敵人 / 子彈 / 地圖背景」。</p>
+        <p id="authNote" class="warn" hidden>請先「登入 Sign in」才能生成（生成需登入；你也可以直接「用預設圖玩」）。</p>
         <label class="field">
           <span>玩家名稱 Player name</span>
           <input id="playerName" type="text" maxlength="24" placeholder="Anonymous" />
@@ -43,9 +49,9 @@
         </div>
       </section>
 
-      <!-- Step 2: generating -->
+      <!-- Step 2: generating (narration log) -->
       <section id="screen-generating" class="screen card">
-        <h2>2 · 生成中…</h2>
+        <h2>2 · 生成中… <span class="sub">Generating</span></h2>
         <div class="spinner"></div>
         <ul id="genLog" class="genlog"></ul>
       </section>
@@ -103,13 +109,10 @@
     </section>
 
     <footer class="foot">
-      <span>Bedrock Nova Canvas · CDK · DynamoDB · S3 · CloudFront</span>
+      <span>Bedrock Nova Canvas · Cognito · CDK · DynamoDB · S3 · CloudFront</span>
     </footer>
   </div>
 
-  <script src="src/config.js"></script>
-  <script src="src/api.js"></script>
-  <script src="src/game.js"></script>
-  <script src="src/main.js"></script>
+  <script type="module" src="src/main.js"></script>
 </body>
 </html>

@@ -1,11 +1,26 @@
-// Runtime configuration.
-// When deployed behind CloudFront, the API is reachable at the same origin under /api.
-// For local dev you can override with ?api=https://xxxx.execute-api.us-east-1.amazonaws.com
-(function () {
+// Runtime configuration loader.
+// In production, CDK deploys /config.json alongside the site. For local dev you
+// can override values via query params, e.g.
+//   ?api=https://xxxx.execute-api.us-east-1.amazonaws.com&userPoolId=...&clientId=...&domain=...
+let cached = null;
+
+export async function loadConfig() {
+  if (cached) return cached;
   const params = new URLSearchParams(location.search);
-  const override = params.get('api');
-  window.GAME_CONFIG = {
-    // Default: same-origin /api (works when served by the CloudFront distribution).
-    apiBase: override || (window.__API_BASE__ || '/api'),
+  let cfg = {};
+  try {
+    const res = await fetch('/config.json', { cache: 'no-store' });
+    if (res.ok) cfg = await res.json();
+  } catch {
+    /* local dev without config.json */
+  }
+  cached = {
+    apiBase: (params.get('api') || cfg.apiBase || '/api').replace(/\/$/, ''),
+    region: params.get('region') || cfg.region || 'us-east-1',
+    userPoolId: params.get('userPoolId') || cfg.userPoolId || '',
+    userPoolClientId: params.get('clientId') || cfg.userPoolClientId || '',
+    hostedUiDomain: params.get('domain') || cfg.hostedUiDomain || '',
+    redirectUri: params.get('redirect') || cfg.redirectUri || `${location.origin}/`,
   };
-})();
+  return cached;
+}

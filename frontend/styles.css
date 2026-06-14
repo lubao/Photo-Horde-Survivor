@@ -125,3 +125,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
   .topbar h1 { font-size: 1.2rem; }
   .navbtn { padding: 6px 10px; font-size: .8rem; }
 }
+
+/* ---- auth controls (top bar) ---- */
+.auth { display: flex; align-items: center; gap: 8px; }
+.auth #authStatus { font-size: .85rem; }
